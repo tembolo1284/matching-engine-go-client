@@ -52,11 +52,14 @@ func main() {
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		receiveMessages(client, done)
-	}()
+	// Only start background receiver for non-demo modes
+	if !*demo {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			receiveMessages(client, done)
+		}()
+	}
 
 	if *demo {
 		runDemo(client, uint32(*userID))
@@ -94,13 +97,14 @@ func receiveMessages(client *meclient.Client, done <-chan struct{}) {
 			if !ok {
 				return
 			}
-			fmt.Printf("[ACK] user=%d order=%d\n", ack.UserID, ack.OrderID)
+			fmt.Printf("[ACK] %s user=%d order=%d\n", ack.Symbol, ack.UserID, ack.OrderID)
 
 		case trade, ok := <-client.Trades():
 			if !ok {
 				return
 			}
-			fmt.Printf("[TRADE] buy(user=%d,oid=%d) sell(user=%d,oid=%d) price=%d qty=%d\n",
+			fmt.Printf("[TRADE] %s buy(user=%d,oid=%d) sell(user=%d,oid=%d) price=%d qty=%d\n",
+				trade.Symbol,
 				trade.BuyUserID, trade.BuyOrderID,
 				trade.SellUserID, trade.SellOrderID,
 				trade.Price, trade.Qty)
@@ -116,7 +120,7 @@ func receiveMessages(client *meclient.Client, done <-chan struct{}) {
 			if !ok {
 				return
 			}
-			fmt.Printf("[CANCEL] user=%d order=%d\n", cancelAck.UserID, cancelAck.OrderID)
+			fmt.Printf("[CANCEL] %s user=%d order=%d\n", cancelAck.Symbol, cancelAck.UserID, cancelAck.OrderID)
 
 		case err, ok := <-client.Errors():
 			if !ok {
@@ -137,109 +141,98 @@ func runDemo(client *meclient.Client, userID uint32) {
 	fmt.Println("Running demo sequence...")
 	fmt.Println()
 
-	pause := func() {
-		time.Sleep(100 * time.Millisecond)
+	// Helper to wait for and print responses
+	drainResponses := func(timeout time.Duration) {
+		deadline := time.After(timeout)
+		for {
+			select {
+			case ack := <-client.Acks():
+				fmt.Printf("   <- ACK user=%d order=%d\n", ack.UserID, ack.OrderID)
+			case trade := <-client.Trades():
+				fmt.Printf("   <- TRADE buy(%d,%d) sell(%d,%d) price=%d qty=%d\n",
+					trade.BuyUserID, trade.BuyOrderID,
+					trade.SellUserID, trade.SellOrderID,
+					trade.Price, trade.Qty)
+			case update := <-client.BookUpdates():
+				fmt.Printf("   <- BOOK %s %s price=%d qty=%d\n",
+					update.Symbol, update.Side, update.Price, update.Qty)
+			case cancelAck := <-client.CancelAcks():
+				fmt.Printf("   <- CANCEL user=%d order=%d\n", cancelAck.UserID, cancelAck.OrderID)
+			case err := <-client.Errors():
+				fmt.Printf("   <- ERROR %v\n", err)
+			case <-deadline:
+				return
+			}
+		}
 	}
 
-	fmt.Println("=== Placing Buy Orders ===")
-	buyOrders := []meclient.NewOrder{
-		{UserID: userID, Symbol: "IBM", Price: 150, Qty: 100, Side: meclient.SideBuy, OrderID: 1},
-		{UserID: userID, Symbol: "IBM", Price: 149, Qty: 200, Side: meclient.SideBuy, OrderID: 2},
-		{UserID: userID, Symbol: "IBM", Price: 148, Qty: 150, Side: meclient.SideBuy, OrderID: 3},
-	}
-
-	for _, order := range buyOrders {
-		fmt.Printf("-> BUY %s %d @ %d (oid=%d)\n", order.Symbol, order.Qty, order.Price, order.OrderID)
+	// Helper to send order and wait for response
+	sendOrder := func(order meclient.NewOrder) {
+		side := "BUY"
+		if order.Side == meclient.SideSell {
+			side = "SELL"
+		}
+		if order.Price == 0 {
+			fmt.Printf("-> %s %s %d @ MARKET (oid=%d)\n", side, order.Symbol, order.Qty, order.OrderID)
+		} else {
+			fmt.Printf("-> %s %s %d @ %d (oid=%d)\n", side, order.Symbol, order.Qty, order.Price, order.OrderID)
+		}
 		if err := client.SendOrder(order); err != nil {
 			fmt.Printf("   Error: %v\n", err)
+			return
 		}
-		pause()
+		drainResponses(200 * time.Millisecond)
 	}
 
-	fmt.Println()
-
-	fmt.Println("=== Placing Sell Orders ===")
-	sellOrders := []meclient.NewOrder{
-		{UserID: userID + 1, Symbol: "IBM", Price: 152, Qty: 100, Side: meclient.SideSell, OrderID: 101},
-		{UserID: userID + 1, Symbol: "IBM", Price: 151, Qty: 200, Side: meclient.SideSell, OrderID: 102},
-		{UserID: userID + 1, Symbol: "IBM", Price: 150, Qty: 50, Side: meclient.SideSell, OrderID: 103},
-	}
-
-	for _, order := range sellOrders {
-		fmt.Printf("-> SELL %s %d @ %d (oid=%d)\n", order.Symbol, order.Qty, order.Price, order.OrderID)
-		if err := client.SendOrder(order); err != nil {
+	// Helper to send cancel and wait for response
+	sendCancel := func(cancel meclient.CancelOrder) {
+		fmt.Printf("-> CANCEL %s user=%d oid=%d\n", cancel.Symbol, cancel.UserID, cancel.OrderID)
+		if err := client.SendCancel(cancel); err != nil {
 			fmt.Printf("   Error: %v\n", err)
+			return
 		}
-		pause()
+		drainResponses(200 * time.Millisecond)
 	}
+
+	// Helper to send flush and wait for responses
+	sendFlush := func() {
+		fmt.Printf("-> FLUSH\n")
+		if err := client.SendFlush(); err != nil {
+			fmt.Printf("   Error: %v\n", err)
+			return
+		}
+		drainResponses(500 * time.Millisecond)
+	}
+
+	fmt.Println("=== Scenario 1: Simple Orders ===")
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideBuy, OrderID: 1})
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 105, Qty: 50, Side: meclient.SideSell, OrderID: 2})
+	sendFlush()
 
 	fmt.Println()
-
-	fmt.Println("=== Placing Crossing Order (should match) ===")
-	crossOrder := meclient.NewOrder{
-		UserID:  userID + 2,
-		Symbol:  "IBM",
-		Price:   155,
-		Qty:     75,
-		Side:    meclient.SideBuy,
-		OrderID: 201,
-	}
-	fmt.Printf("-> BUY %s %d @ %d (oid=%d)\n", crossOrder.Symbol, crossOrder.Qty, crossOrder.Price, crossOrder.OrderID)
-	if err := client.SendOrder(crossOrder); err != nil {
-		fmt.Printf("   Error: %v\n", err)
-	}
-
-	pause()
-	fmt.Println()
-
-	fmt.Println("=== Cancelling Order ===")
-	cancelReq := meclient.CancelOrder{
-		Symbol:  "IBM",
-		UserID:  userID,
-		OrderID: 2,
-	}
-	fmt.Printf("-> CANCEL %s user=%d oid=%d\n", cancelReq.Symbol, cancelReq.UserID, cancelReq.OrderID)
-	if err := client.SendCancel(cancelReq); err != nil {
-		fmt.Printf("   Error: %v\n", err)
-	}
-
-	pause()
-	fmt.Println()
-
-	fmt.Println("=== Testing Different Symbol ===")
-	aaplOrder := meclient.NewOrder{
-		UserID:  userID,
-		Symbol:  "AAPL",
-		Price:   175,
-		Qty:     50,
-		Side:    meclient.SideBuy,
-		OrderID: 301,
-	}
-	fmt.Printf("-> BUY %s %d @ %d (oid=%d)\n", aaplOrder.Symbol, aaplOrder.Qty, aaplOrder.Price, aaplOrder.OrderID)
-	if err := client.SendOrder(aaplOrder); err != nil {
-		fmt.Printf("   Error: %v\n", err)
-	}
-
-	pause()
-	fmt.Println()
-
-	fmt.Println("=== Market Order Test ===")
-	marketOrder := meclient.NewOrder{
-		UserID:  userID + 3,
-		Symbol:  "IBM",
-		Price:   0,
-		Qty:     25,
-		Side:    meclient.SideSell,
-		OrderID: 401,
-	}
-	fmt.Printf("-> SELL %s %d @ MARKET (oid=%d)\n", marketOrder.Symbol, marketOrder.Qty, marketOrder.OrderID)
-	if err := client.SendOrder(marketOrder); err != nil {
-		fmt.Printf("   Error: %v\n", err)
-	}
+	fmt.Println("=== Scenario 2: Matching Orders ===")
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideBuy, OrderID: 3})
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideSell, OrderID: 4})
+	sendFlush()
 
 	fmt.Println()
-	fmt.Println("=== Waiting for responses (2 seconds) ===")
-	time.Sleep(2 * time.Second)
+	fmt.Println("=== Scenario 3: Partial Fill ===")
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 100, Side: meclient.SideBuy, OrderID: 5})
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 30, Side: meclient.SideSell, OrderID: 6})
+	sendFlush()
+
+	fmt.Println()
+	fmt.Println("=== Scenario 4: Cancel Order ===")
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideBuy, OrderID: 7})
+	sendCancel(meclient.CancelOrder{Symbol: "IBM", UserID: userID, OrderID: 7})
+	sendFlush()
+
+	fmt.Println()
+	fmt.Println("=== Scenario 5: Multiple Symbols ===")
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideBuy, OrderID: 8})
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "AAPL", Price: 150, Qty: 30, Side: meclient.SideBuy, OrderID: 9})
+	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "TSLA", Price: 200, Qty: 25, Side: meclient.SideSell, OrderID: 10})
+	sendFlush()
 
 	fmt.Println()
 	fmt.Println("Demo complete!")
@@ -418,7 +411,7 @@ func printUsage() {
 	fmt.Println("  ./example -addr HOST:PORT -interactive Interactive command mode")
 	fmt.Println()
 	fmt.Println("Options:")
-	fmt.Println("  -addr string    Server address (default: localhost:12345)")
+	fmt.Println("  -addr string    Server address (default: localhost:1234)")
 	fmt.Println("  -user uint      Default user ID (default: 1)")
 	fmt.Println("  -demo           Run demo sequence")
 	fmt.Println("  -interactive    Interactive mode")
