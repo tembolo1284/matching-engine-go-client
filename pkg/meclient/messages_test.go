@@ -68,12 +68,17 @@ func TestNewOrder_Fields(t *testing.T) {
 
 func TestTrade_Fields(t *testing.T) {
 	trade := Trade{
+		Symbol:      "IBM",
 		BuyUserID:   1,
 		BuyOrderID:  1001,
 		SellUserID:  2,
 		SellOrderID: 2001,
 		Price:       150,
 		Qty:         100,
+	}
+
+	if trade.Symbol != "IBM" {
+		t.Errorf("expected Symbol IBM, got %s", trade.Symbol)
 	}
 
 	if trade.BuyUserID != 1 {

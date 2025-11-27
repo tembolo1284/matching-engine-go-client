@@ -6,7 +6,7 @@ import (
 )
 
 func TestDecoder_Ack(t *testing.T) {
-	input := "A, 1, 1001\n"
+	input := "A, IBM, 1, 1001\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -16,6 +16,10 @@ func TestDecoder_Ack(t *testing.T) {
 
 	if msg.Ack == nil {
 		t.Fatal("expected Ack message")
+	}
+
+	if msg.Ack.Symbol != "IBM" {
+		t.Errorf("expected Symbol IBM, got %s", msg.Ack.Symbol)
 	}
 
 	if msg.Ack.UserID != 1 {
@@ -28,7 +32,7 @@ func TestDecoder_Ack(t *testing.T) {
 }
 
 func TestDecoder_Trade(t *testing.T) {
-	input := "T, 1, 1001, 2, 2001, 150, 100\n"
+	input := "T, IBM, 1, 1001, 2, 2001, 150, 100\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -41,6 +45,9 @@ func TestDecoder_Trade(t *testing.T) {
 	}
 
 	trade := msg.Trade
+	if trade.Symbol != "IBM" {
+		t.Errorf("expected Symbol IBM, got %s", trade.Symbol)
+	}
 	if trade.BuyUserID != 1 {
 		t.Errorf("expected BuyUserID 1, got %d", trade.BuyUserID)
 	}
@@ -108,7 +115,7 @@ func TestDecoder_BookUpdate_Sell(t *testing.T) {
 }
 
 func TestDecoder_CancelAck(t *testing.T) {
-	input := "X, 1, 1001\n"
+	input := "C, IBM, 1, 1001\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -118,6 +125,10 @@ func TestDecoder_CancelAck(t *testing.T) {
 
 	if msg.CancelAck == nil {
 		t.Fatal("expected CancelAck message")
+	}
+
+	if msg.CancelAck.Symbol != "IBM" {
+		t.Errorf("expected Symbol IBM, got %s", msg.CancelAck.Symbol)
 	}
 
 	if msg.CancelAck.UserID != 1 {
@@ -130,10 +141,10 @@ func TestDecoder_CancelAck(t *testing.T) {
 }
 
 func TestDecoder_MultipleMessages(t *testing.T) {
-	input := `A, 1, 1001
-T, 1, 1001, 2, 2001, 150, 100
+	input := `A, IBM, 1, 1001
+T, IBM, 1, 1001, 2, 2001, 150, 100
 B, IBM, S, 151, 200
-X, 2, 2001
+C, IBM, 2, 2001
 `
 	dec := newDecoder(strings.NewReader(input))
 
@@ -175,7 +186,7 @@ X, 2, 2001
 }
 
 func TestDecoder_SkipsEmptyLines(t *testing.T) {
-	input := "\n\nA, 1, 1001\n\n"
+	input := "\n\nA, IBM, 1, 1001\n\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -189,7 +200,7 @@ func TestDecoder_SkipsEmptyLines(t *testing.T) {
 }
 
 func TestDecoder_WhitespaceHandling(t *testing.T) {
-	input := "A,  1  ,  1001  \n"
+	input := "A,  IBM  ,  1  ,  1001  \n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -208,7 +219,7 @@ func TestDecoder_WhitespaceHandling(t *testing.T) {
 }
 
 func TestDecoder_LargeValues(t *testing.T) {
-	input := "A, 4294967295, 4294967295\n"
+	input := "A, TEST, 4294967295, 4294967295\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	msg, err := dec.decode()
@@ -218,5 +229,24 @@ func TestDecoder_LargeValues(t *testing.T) {
 
 	if msg.Ack.UserID != 4294967295 {
 		t.Errorf("expected max uint32, got %d", msg.Ack.UserID)
+	}
+}
+
+func TestDecoder_BookUpdate_EmptyBook(t *testing.T) {
+	input := "B, IBM, B, -, -\n"
+	dec := newDecoder(strings.NewReader(input))
+
+	msg, err := dec.decode()
+	if err != nil {
+		t.Fatalf("decode failed: %v", err)
+	}
+
+	if msg.BookUpdate == nil {
+		t.Fatal("expected BookUpdate message")
+	}
+
+	if msg.BookUpdate.Price != 0 || msg.BookUpdate.Qty != 0 {
+		t.Errorf("expected zero price/qty for empty book, got price=%d qty=%d",
+			msg.BookUpdate.Price, msg.BookUpdate.Qty)
 	}
 }

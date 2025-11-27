@@ -47,7 +47,7 @@ func BenchmarkEncoder_Cancel(b *testing.B) {
 }
 
 func BenchmarkDecoder_Ack(b *testing.B) {
-	input := "A, 1, 1001\n"
+	input := "A, IBM, 1, 1001\n"
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -59,7 +59,7 @@ func BenchmarkDecoder_Ack(b *testing.B) {
 }
 
 func BenchmarkDecoder_Trade(b *testing.B) {
-	input := "T, 1, 1001, 2, 2001, 150, 100\n"
+	input := "T, IBM, 1, 1001, 2, 2001, 150, 100\n"
 
 	b.ResetTimer()
 	b.ReportAllocs()

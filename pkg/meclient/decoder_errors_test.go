@@ -24,14 +24,14 @@ func TestDecoder_InvalidFieldCount(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"ack_too_few", "A, 1\n"},
-		{"ack_too_many", "A, 1, 2, 3\n"},
-		{"trade_too_few", "T, 1, 2, 3\n"},
-		{"trade_too_many", "T, 1, 2, 3, 4, 5, 6, 7, 8\n"},
+		{"ack_too_few", "A, IBM, 1\n"},
+		{"ack_too_many", "A, IBM, 1, 2, 3\n"},
+		{"trade_too_few", "T, IBM, 1, 2, 3\n"},
+		{"trade_too_many", "T, IBM, 1, 2, 3, 4, 5, 6, 7, 8\n"},
 		{"book_too_few", "B, IBM, B\n"},
 		{"book_too_many", "B, IBM, B, 100, 200, 300\n"},
-		{"cancel_too_few", "X, 1\n"},
-		{"cancel_too_many", "X, 1, 2, 3\n"},
+		{"cancel_too_few", "C, IBM, 1\n"},
+		{"cancel_too_many", "C, IBM, 1, 2, 3\n"},
 	}
 
 	for _, tt := range tests {
@@ -50,16 +50,16 @@ func TestDecoder_InvalidNumbers(t *testing.T) {
 		name  string
 		input string
 	}{
-		{"ack_bad_user", "A, abc, 1001\n"},
-		{"ack_bad_order", "A, 1, xyz\n"},
-		{"ack_negative", "A, -1, 1001\n"},
-		{"trade_bad_buy_user", "T, abc, 1001, 2, 2001, 150, 100\n"},
-		{"trade_bad_price", "T, 1, 1001, 2, 2001, bad, 100\n"},
-		{"trade_bad_qty", "T, 1, 1001, 2, 2001, 150, notanumber\n"},
+		{"ack_bad_user", "A, IBM, abc, 1001\n"},
+		{"ack_bad_order", "A, IBM, 1, xyz\n"},
+		{"ack_negative", "A, IBM, -1, 1001\n"},
+		{"trade_bad_buy_user", "T, IBM, abc, 1001, 2, 2001, 150, 100\n"},
+		{"trade_bad_price", "T, IBM, 1, 1001, 2, 2001, bad, 100\n"},
+		{"trade_bad_qty", "T, IBM, 1, 1001, 2, 2001, 150, notanumber\n"},
 		{"book_bad_price", "B, IBM, B, abc, 100\n"},
 		{"book_bad_qty", "B, IBM, B, 150, notanumber\n"},
-		{"cancel_bad_user", "X, abc, 1001\n"},
-		{"cancel_bad_order", "X, 1, xyz\n"},
+		{"cancel_bad_user", "C, IBM, abc, 1001\n"},
+		{"cancel_bad_order", "C, IBM, 1, xyz\n"},
 	}
 
 	for _, tt := range tests {
@@ -99,7 +99,7 @@ func TestDecoder_InvalidSide(t *testing.T) {
 
 func TestDecoder_Overflow(t *testing.T) {
 	// Value larger than uint32 max
-	input := "A, 9999999999999, 1001\n"
+	input := "A, IBM, 9999999999999, 1001\n"
 	dec := newDecoder(strings.NewReader(input))
 
 	_, err := dec.decode()

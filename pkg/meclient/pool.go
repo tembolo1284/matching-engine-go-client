@@ -36,6 +36,7 @@ func getAck() *Ack {
 
 // putAck returns an Ack to the pool.
 func putAck(a *Ack) {
+	a.Symbol = ""
 	a.UserID = 0
 	a.OrderID = 0
 	ackPool.Put(a)
@@ -70,6 +71,7 @@ func getCancelAck() *CancelAck {
 
 // putCancelAck returns a CancelAck to the pool.
 func putCancelAck(c *CancelAck) {
+	c.Symbol = ""
 	c.UserID = 0
 	c.OrderID = 0
 	cancelAckPool.Put(c)

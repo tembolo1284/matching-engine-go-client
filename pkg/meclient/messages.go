@@ -42,13 +42,14 @@ type CancelOrder struct {
 
 // Ack represents an order acknowledgment from the server.
 type Ack struct {
+	Symbol  string
 	UserID  uint32
 	OrderID uint32
 }
 
 // Trade represents an execution report from the server.
-// Fields ordered to pack tightly.
 type Trade struct {
+	Symbol      string
 	Price       uint32
 	Qty         uint32
 	BuyUserID   uint32
@@ -67,6 +68,7 @@ type BookUpdate struct {
 
 // CancelAck represents a cancel confirmation from the server.
 type CancelAck struct {
+	Symbol  string
 	UserID  uint32
 	OrderID uint32
 }

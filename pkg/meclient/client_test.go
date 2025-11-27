@@ -1,15 +1,78 @@
 package meclient
 
 import (
-	"strings"
+	"errors"
 	"testing"
+	"time"
 )
 
-func BenchmarkEncoder_NewOrder(b *testing.B) {
-	var buf strings.Builder
-	enc := newEncoder(&buf)
+func TestClient_New_Valid(t *testing.T) {
+	cfg := DefaultConfig("localhost:12345")
+	client, err := New(cfg)
 
-	order := &NewOrder{
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if client == nil {
+		t.Fatal("expected non-nil client")
+	}
+}
+
+func TestClient_New_InvalidConfig(t *testing.T) {
+	cfg := Config{Address: ""} // Invalid - empty address
+	_, err := New(cfg)
+
+	if !errors.Is(err, ErrInvalidConfig) {
+		t.Errorf("expected ErrInvalidConfig, got: %v", err)
+	}
+}
+
+func TestClient_ConnectAndClose(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
+
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	if !client.IsConnected() {
+		t.Error("expected client to be connected")
+	}
+
+	if err := client.Close(); err != nil {
+		t.Fatalf("Close failed: %v", err)
+	}
+
+	if client.IsConnected() {
+		t.Error("expected client to be disconnected after Close")
+	}
+}
+
+func TestClient_SendOrder(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
+
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	order := NewOrder{
 		UserID:  1,
 		Symbol:  "IBM",
 		Price:   150,
@@ -18,147 +81,233 @@ func BenchmarkEncoder_NewOrder(b *testing.B) {
 		OrderID: 1001,
 	}
 
-	b.ResetTimer()
-	b.ReportAllocs()
+	if err := client.SendOrder(order); err != nil {
+		t.Fatalf("SendOrder failed: %v", err)
+	}
 
-	for i := 0; i < b.N; i++ {
-		buf.Reset()
-		enc.encodeNewOrder(order)
+	if !server.waitForReceived(1, time.Second) {
+		t.Fatal("server did not receive message")
+	}
+
+	received := server.getReceived()
+	expected := "N, 1, IBM, 150, 100, B, 1001"
+	if received[0] != expected {
+		t.Errorf("expected %q, got %q", expected, received[0])
 	}
 }
 
-func BenchmarkEncoder_Cancel(b *testing.B) {
-	var buf strings.Builder
-	enc := newEncoder(&buf)
+func TestClient_SendOrder_Invalid(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
 
-	cancel := &CancelOrder{
+	cfg := DefaultConfig(server.addr())
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	// Empty symbol
+	order := NewOrder{Symbol: "", Qty: 100, Side: SideBuy}
+	err = client.SendOrder(order)
+	if !errors.Is(err, ErrEmptySymbol) {
+		t.Errorf("expected ErrEmptySymbol, got: %v", err)
+	}
+
+	// Zero quantity
+	order = NewOrder{Symbol: "IBM", Qty: 0, Side: SideBuy}
+	err = client.SendOrder(order)
+	if !errors.Is(err, ErrZeroQuantity) {
+		t.Errorf("expected ErrZeroQuantity, got: %v", err)
+	}
+}
+
+func TestClient_SendCancel(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
+
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	cancel := CancelOrder{
 		Symbol:  "IBM",
 		UserID:  1,
 		OrderID: 1001,
 	}
 
-	b.ResetTimer()
-	b.ReportAllocs()
+	if err := client.SendCancel(cancel); err != nil {
+		t.Fatalf("SendCancel failed: %v", err)
+	}
 
-	for i := 0; i < b.N; i++ {
-		buf.Reset()
-		enc.encodeCancel(cancel)
+	if !server.waitForReceived(1, time.Second) {
+		t.Fatal("server did not receive message")
+	}
+
+	received := server.getReceived()
+	expected := "C, IBM, 1, 1001"
+	if received[0] != expected {
+		t.Errorf("expected %q, got %q", expected, received[0])
 	}
 }
 
-func BenchmarkDecoder_Ack(b *testing.B) {
-	input := "A, 1, 1001\n"
+func TestClient_SendFlush(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
 
-	b.ResetTimer()
-	b.ReportAllocs()
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
 
-	for i := 0; i < b.N; i++ {
-		dec := newDecoder(strings.NewReader(input))
-		_, _ = dec.decode()
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	if err := client.SendFlush(); err != nil {
+		t.Fatalf("SendFlush failed: %v", err)
+	}
+
+	if !server.waitForReceived(1, time.Second) {
+		t.Fatal("server did not receive message")
+	}
+
+	received := server.getReceived()
+	if received[0] != "F" {
+		t.Errorf("expected F, got %q", received[0])
 	}
 }
 
-func BenchmarkDecoder_Trade(b *testing.B) {
-	input := "T, 1, 1001, 2, 2001, 150, 100\n"
+func TestClient_MultipleMessages(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		dec := newDecoder(strings.NewReader(input))
-		_, _ = dec.decode()
-	}
-}
-
-func BenchmarkDecoder_BookUpdate(b *testing.B) {
-	input := "B, IBM, B, 150, 500\n"
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		dec := newDecoder(strings.NewReader(input))
-		_, _ = dec.decode()
-	}
-}
-
-func BenchmarkValidateOrder(b *testing.B) {
-	order := &NewOrder{
-		UserID:  1,
-		Symbol:  "IBM",
-		Price:   150,
-		Qty:     100,
-		Side:    SideBuy,
-		OrderID: 1001,
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
 	}
 
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_ = validateOrder(order)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
 	}
-}
+	defer client.Close()
 
-func BenchmarkStats_Increment(b *testing.B) {
-	stats := &ClientStats{}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		stats.incMessagesSent()
-	}
-}
-
-func BenchmarkStats_Snapshot(b *testing.B) {
-	stats := &ClientStats{}
-	stats.incMessagesSent()
-	stats.incMessagesReceived()
-	stats.incErrorCount()
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	for i := 0; i < b.N; i++ {
-		_ = stats.Snapshot()
-	}
-}
-
-// Parallel benchmarks
-
-func BenchmarkStats_IncrementParallel(b *testing.B) {
-	stats := &ClientStats{}
-
-	b.ResetTimer()
-	b.ReportAllocs()
-
-	b.RunParallel(func(pb *testing.PB) {
-		for pb.Next() {
-			stats.incMessagesSent()
-		}
-	})
-}
-
-func BenchmarkEncoder_NewOrder_Parallel(b *testing.B) {
-	b.ReportAllocs()
-
-	b.RunParallel(func(pb *testing.PB) {
-		var buf strings.Builder
-		enc := newEncoder(&buf)
-
-		order := &NewOrder{
+	for i := uint32(1); i <= 5; i++ {
+		order := NewOrder{
 			UserID:  1,
-			Symbol:  "IBM",
-			Price:   150,
-			Qty:     100,
+			Symbol:  "TEST",
+			Price:   100 + i,
+			Qty:     10 * i,
 			Side:    SideBuy,
-			OrderID: 1001,
+			OrderID: 1000 + i,
 		}
+		if err := client.SendOrder(order); err != nil {
+			t.Fatalf("SendOrder %d failed: %v", i, err)
+		}
+	}
 
-		for pb.Next() {
-			buf.Reset()
-			enc.encodeNewOrder(order)
-		}
+	if !server.waitForReceived(5, time.Second) {
+		t.Fatal("server did not receive all messages")
+	}
+
+	received := server.getReceived()
+	if len(received) != 5 {
+		t.Errorf("expected 5 messages, got %d", len(received))
+	}
+}
+
+func TestClient_SendAfterClose(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
+
+	cfg := DefaultConfig(server.addr())
+	cfg.AutoReconnect = false
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+
+	client.Close()
+
+	err = client.SendOrder(NewOrder{
+		UserID:  1,
+		Symbol:  "TEST",
+		Price:   100,
+		Qty:     10,
+		Side:    SideBuy,
+		OrderID: 1,
 	})
+
+	if !errors.Is(err, ErrClientClosed) {
+		t.Errorf("expected ErrClientClosed, got: %v", err)
+	}
+}
+
+func TestClient_ConnectFailure(t *testing.T) {
+	cfg := DefaultConfig("127.0.0.1:1") // Port 1 should be unavailable
+	cfg.ConnectTimeout = 100 * time.Millisecond
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	err = client.Connect()
+	if err == nil {
+		client.Close()
+		t.Fatal("expected connection to fail")
+	}
+}
+
+func TestClient_Stats(t *testing.T) {
+	server := newMockServer(t)
+	defer server.close()
+
+	cfg := DefaultConfig(server.addr())
+	client, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New failed: %v", err)
+	}
+
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Connect failed: %v", err)
+	}
+	defer client.Close()
+
+	// Send some messages
+	for i := uint32(0); i < 3; i++ {
+		client.SendOrder(NewOrder{
+			Symbol:  "TEST",
+			Qty:     10,
+			Side:    SideBuy,
+			OrderID: i,
+		})
+	}
+
+	time.Sleep(50 * time.Millisecond)
+
+	stats := client.Stats()
+	if stats.MessagesSent != 3 {
+		t.Errorf("expected 3 messages sent, got %d", stats.MessagesSent)
+	}
 }

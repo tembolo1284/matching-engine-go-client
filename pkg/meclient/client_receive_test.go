@@ -23,11 +23,11 @@ func TestClient_ReceiveAck(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	server.sendToConn(0, "A, 1, 1001")
+	server.sendToConn(0, "A, IBM, 1, 1001")
 
 	select {
 	case ack := <-client.Acks():
-		if ack.UserID != 1 || ack.OrderID != 1001 {
+		if ack.Symbol != "IBM" || ack.UserID != 1 || ack.OrderID != 1001 {
 			t.Errorf("unexpected ack: %+v", ack)
 		}
 	case <-time.After(time.Second):
@@ -53,10 +53,13 @@ func TestClient_ReceiveTrade(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	server.sendToConn(0, "T, 1, 1001, 2, 2001, 150, 100")
+	server.sendToConn(0, "T, IBM, 1, 1001, 2, 2001, 150, 100")
 
 	select {
 	case trade := <-client.Trades():
+		if trade.Symbol != "IBM" {
+			t.Errorf("unexpected trade symbol: %s", trade.Symbol)
+		}
 		if trade.BuyUserID != 1 || trade.BuyOrderID != 1001 {
 			t.Errorf("unexpected trade buy side: %+v", trade)
 		}
@@ -125,11 +128,11 @@ func TestClient_ReceiveCancelAck(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	server.sendToConn(0, "X, 3, 3001")
+	server.sendToConn(0, "C, IBM, 3, 3001")
 
 	select {
 	case cancelAck := <-client.CancelAcks():
-		if cancelAck.UserID != 3 || cancelAck.OrderID != 3001 {
+		if cancelAck.Symbol != "IBM" || cancelAck.UserID != 3 || cancelAck.OrderID != 3001 {
 			t.Errorf("unexpected cancel ack: %+v", cancelAck)
 		}
 	case <-time.After(time.Second):
@@ -156,9 +159,9 @@ func TestClient_ReceiveMultipleMessages(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Send multiple messages
-	server.sendToConn(0, "A, 1, 1001")
-	server.sendToConn(0, "A, 1, 1002")
-	server.sendToConn(0, "A, 1, 1003")
+	server.sendToConn(0, "A, IBM, 1, 1001")
+	server.sendToConn(0, "A, IBM, 1, 1002")
+	server.sendToConn(0, "A, IBM, 1, 1003")
 
 	received := 0
 	timeout := time.After(time.Second)
@@ -191,10 +194,10 @@ func TestClient_ReceiveMixedMessages(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	server.sendToConn(0, "A, 1, 1001")
-	server.sendToConn(0, "T, 1, 1001, 2, 2001, 150, 100")
+	server.sendToConn(0, "A, IBM, 1, 1001")
+	server.sendToConn(0, "T, IBM, 1, 1001, 2, 2001, 150, 100")
 	server.sendToConn(0, "B, IBM, B, 149, 500")
-	server.sendToConn(0, "X, 1, 1002")
+	server.sendToConn(0, "C, IBM, 1, 1002")
 
 	timeout := time.After(time.Second)
 

@@ -190,11 +190,11 @@ func (c *Client) enqueueWrite(req writeRequest) error {
 }
 
 // Channel accessors
-func (c *Client) Acks() <-chan Ack                  { return c.ackCh }
-func (c *Client) Trades() <-chan Trade              { return c.tradeCh }
-func (c *Client) BookUpdates() <-chan BookUpdate    { return c.bookUpdateCh }
-func (c *Client) CancelAcks() <-chan CancelAck      { return c.cancelAckCh }
-func (c *Client) Errors() <-chan error              { return c.errorCh }
+func (c *Client) Acks() <-chan Ack               { return c.ackCh }
+func (c *Client) Trades() <-chan Trade           { return c.tradeCh }
+func (c *Client) BookUpdates() <-chan BookUpdate { return c.bookUpdateCh }
+func (c *Client) CancelAcks() <-chan CancelAck   { return c.cancelAckCh }
+func (c *Client) Errors() <-chan error           { return c.errorCh }
 func (c *Client) Reconnects() <-chan ReconnectEvent { return c.reconnectCh }
 
 // IsConnected returns true if the client is currently connected.
