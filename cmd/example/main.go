@@ -19,7 +19,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/pauljunsukhan/matching-engine-go/pkg/meclient"
+	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient"
 )
 
 func main() {
