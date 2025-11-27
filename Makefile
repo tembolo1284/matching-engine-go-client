@@ -79,12 +79,12 @@ clean:
 
 # Run demo mode (requires server running)
 run-demo: build
-	@echo "Running demo (connect to localhost:12345)..."
+	@echo "Running demo (connect to localhost:1234)..."
 	$(BUILD_DIR)/$(BINARY_NAME) -demo
 
 # Run interactive mode (requires server running)
 run-interactive: build
-	@echo "Running interactive mode (connect to localhost:12345)..."
+	@echo "Running interactive mode (connect to localhost:1234)..."
 	$(BUILD_DIR)/$(BINARY_NAME) -interactive
 
 # Tidy up go.mod

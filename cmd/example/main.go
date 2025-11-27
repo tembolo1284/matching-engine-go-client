@@ -2,9 +2,9 @@
 //
 // Usage:
 //
-//	./example -addr localhost:12345
-//	./example -addr localhost:12345 -interactive
-//	./example -addr localhost:12345 -demo
+//	./example -addr localhost:1234
+//	./example -addr localhost:1234 -interactive
+//	./example -addr localhost:1234 -demo
 package main
 
 import (
@@ -23,7 +23,7 @@ import (
 )
 
 func main() {
-	addr := flag.String("addr", "localhost:12345", "Server address (host:port)")
+	addr := flag.String("addr", "localhost:1234", "Server address (host:port)")
 	interactive := flag.Bool("interactive", false, "Run in interactive mode")
 	demo := flag.Bool("demo", false, "Run demo sequence")
 	userID := flag.Uint("user", 1, "Default user ID for orders")
