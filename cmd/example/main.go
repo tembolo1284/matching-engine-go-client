@@ -147,9 +147,10 @@ func runDemo(client *meclient.Client, userID uint32) {
 		for {
 			select {
 			case ack := <-client.Acks():
-				fmt.Printf("   <- ACK user=%d order=%d\n", ack.UserID, ack.OrderID)
+				fmt.Printf("   <- ACK %s user=%d order=%d\n", ack.Symbol, ack.UserID, ack.OrderID)
 			case trade := <-client.Trades():
-				fmt.Printf("   <- TRADE buy(%d,%d) sell(%d,%d) price=%d qty=%d\n",
+				fmt.Printf("   <- TRADE %s buy(%d,%d) sell(%d,%d) price=%d qty=%d\n",
+					trade.Symbol,
 					trade.BuyUserID, trade.BuyOrderID,
 					trade.SellUserID, trade.SellOrderID,
 					trade.Price, trade.Qty)
@@ -157,14 +158,20 @@ func runDemo(client *meclient.Client, userID uint32) {
 				fmt.Printf("   <- BOOK %s %s price=%d qty=%d\n",
 					update.Symbol, update.Side, update.Price, update.Qty)
 			case cancelAck := <-client.CancelAcks():
-				fmt.Printf("   <- CANCEL user=%d order=%d\n", cancelAck.UserID, cancelAck.OrderID)
+				fmt.Printf("   <- CANCEL %s user=%d order=%d\n", cancelAck.Symbol, cancelAck.UserID, cancelAck.OrderID)
 			case err := <-client.Errors():
-				fmt.Printf("   <- ERROR %v\n", err)
+				fmt.Printf("   <- ERROR: %v\n", err)
 			case <-deadline:
 				return
 			}
 		}
 	}
+
+	// Check for any immediate errors
+	fmt.Println("Checking connection...")
+	drainResponses(100 * time.Millisecond)
+	fmt.Println("Connection OK, starting scenarios...")
+	fmt.Println()
 
 	// Helper to send order and wait for response
 	sendOrder := func(order meclient.NewOrder) {
@@ -178,20 +185,20 @@ func runDemo(client *meclient.Client, userID uint32) {
 			fmt.Printf("-> %s %s %d @ %d (oid=%d)\n", side, order.Symbol, order.Qty, order.Price, order.OrderID)
 		}
 		if err := client.SendOrder(order); err != nil {
-			fmt.Printf("   Error: %v\n", err)
+			fmt.Printf("   Send error: %v\n", err)
 			return
 		}
-		drainResponses(200 * time.Millisecond)
+		drainResponses(500 * time.Millisecond)
 	}
 
 	// Helper to send cancel and wait for response
 	sendCancel := func(cancel meclient.CancelOrder) {
 		fmt.Printf("-> CANCEL %s user=%d oid=%d\n", cancel.Symbol, cancel.UserID, cancel.OrderID)
 		if err := client.SendCancel(cancel); err != nil {
-			fmt.Printf("   Error: %v\n", err)
+			fmt.Printf("   Send error: %v\n", err)
 			return
 		}
-		drainResponses(200 * time.Millisecond)
+		drainResponses(500 * time.Millisecond)
 	}
 
 	// Helper to send flush and wait for responses

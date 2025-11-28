@@ -257,7 +257,7 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) processInboundMessages(conn net.Conn) error {
-	decoder := newDecoder(bufio.NewReaderSize(conn, DefaultReadBuffer))
+	decoder := newDecoder(conn)
 	batchCount := 0
 
 	for {
@@ -273,6 +273,8 @@ func (c *Client) processInboundMessages(conn net.Conn) error {
 			if err == io.EOF {
 				return errors.New("connection closed by server")
 			}
+			// Log decode errors for debugging
+			c.sendError(fmt.Errorf("decode error: %w", err))
 			return err
 		}
 
@@ -356,12 +358,15 @@ func (c *Client) sendError(err error) {
 // writeLoop processes outbound messages.
 func (c *Client) writeLoop() {
 	defer c.wg.Done()
+	// fmt.Println("[DEBUG] writeLoop started")
 
 	for {
 		select {
 		case <-c.ctx.Done():
+			// fmt.Println("[DEBUG] writeLoop: context done, exiting")
 			return
 		case req := <-c.writeCh:
+			// fmt.Printf("[DEBUG] writeLoop: received request type %d\n", req.reqType)
 			if err := c.processWrite(req); err != nil {
 				c.sendError(fmt.Errorf("write error: %w", err))
 				c.stats.incErrorCount()
@@ -377,6 +382,7 @@ func (c *Client) processWrite(req writeRequest) error {
 	c.connMu.RUnlock()
 
 	if encoder == nil || writer == nil {
+		// fmt.Println("[DEBUG] processWrite: encoder or writer is nil!")
 		return ErrNotConnected
 	}
 
@@ -384,18 +390,28 @@ func (c *Client) processWrite(req writeRequest) error {
 
 	switch req.reqType {
 	case writeRequestOrder:
+		// fmt.Printf("[DEBUG] Writing order: %s %d @ %d\n", req.order.Symbol, req.order.Qty, req.order.Price)
 		err = encoder.encodeNewOrder(&req.order)
 	case writeRequestCancel:
+		// fmt.Printf("[DEBUG] Writing cancel: %s oid=%d\n", req.cancel.Symbol, req.cancel.OrderID)
 		err = encoder.encodeCancel(&req.cancel)
 	case writeRequestFlush:
+		// fmt.Println("[DEBUG] Writing flush")
 		err = encoder.encodeFlush()
 	}
 
 	if err != nil {
+		// fmt.Printf("[DEBUG] Encode error: %v\n", err)
 		return err
 	}
 
-	return writer.Flush()
+	err = writer.Flush()
+	if err != nil {
+		fmt.Printf("[DEBUG] Flush error: %v\n", err)
+	} else {
+		// fmt.Println("[DEBUG] Flush successful")
+	}
+	return err
 }
 
 // reconnect attempts to reconnect with exponential backoff.

@@ -1,23 +1,22 @@
 package meclient
 
 import (
-	"bufio"
-	"fmt"
+	"encoding/binary"
 	"io"
+        "fmt"
 	"strconv"
 	"strings"
 )
 
 // decoder handles parsing of inbound messages from the server.
+// Messages are framed with a 4-byte big-endian length prefix.
 type decoder struct {
-	scanner *bufio.Scanner
+	r io.Reader
 }
 
 // newDecoder creates a decoder that reads from r.
 func newDecoder(r io.Reader) *decoder {
-	return &decoder{
-		scanner: bufio.NewScanner(r),
-	}
+	return &decoder{r: r}
 }
 
 // message represents a decoded message from the server.
@@ -32,16 +31,29 @@ type message struct {
 // decode reads and parses the next message from the server.
 // Returns io.EOF when the connection is closed.
 func (d *decoder) decode() (*message, error) {
-	if !d.scanner.Scan() {
-		if err := d.scanner.Err(); err != nil {
-			return nil, err
-		}
-		return nil, io.EOF
+	// Read 4-byte length header (big-endian)
+	lenBuf := make([]byte, 4)
+	if _, err := io.ReadFull(d.r, lenBuf); err != nil {
+		return nil, err
 	}
 
-	line := strings.TrimSpace(d.scanner.Text())
+	msgLen := binary.BigEndian.Uint32(lenBuf)
+	if msgLen == 0 || msgLen > 16384 {
+		return nil, fmt.Errorf("invalid message length: %d", msgLen)
+	}
+
+	// Read message payload
+	payload := make([]byte, msgLen)
+	if _, err := io.ReadFull(d.r, payload); err != nil {
+		return nil, err
+	}
+
+	// Debug
+	// fmt.Printf("[DEBUG] Received %d bytes: %q\n", msgLen, string(payload))
+
+	line := strings.TrimSpace(string(payload))
 	if len(line) == 0 {
-		return d.decode() // Skip empty lines
+		return d.decode() // Skip empty messages
 	}
 
 	return d.parseLine(line)
