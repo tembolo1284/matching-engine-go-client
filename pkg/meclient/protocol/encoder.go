@@ -16,15 +16,13 @@ const (
 // Encoder encodes messages to the wire format with length-prefix framing.
 type Encoder struct {
 	w      io.Writer
-	buf    []byte
 	lenBuf [4]byte
 }
 
 // NewEncoder creates a new encoder writing to w.
 func NewEncoder(w io.Writer) *Encoder {
 	return &Encoder{
-		w:   w,
-		buf: make([]byte, 0, 256),
+		w: w,
 	}
 }
 
@@ -56,8 +54,7 @@ func (e *Encoder) EncodeNewOrder(order *NewOrder) error {
 		side = 'S'
 	}
 
-	e.buf = e.buf[:0]
-	e.buf = fmt.Appendf(e.buf, "N,%d,%s,%d,%d,%c,%d\n",
+	payload := fmt.Sprintf("N,%d,%s,%d,%d,%c,%d\n",
 		order.UserID,
 		order.Symbol,
 		order.Price,
@@ -65,24 +62,21 @@ func (e *Encoder) EncodeNewOrder(order *NewOrder) error {
 		side,
 		order.OrderID)
 
-	return e.writeFrame(e.buf)
+	return e.writeFrame([]byte(payload))
 }
 
 // EncodeCancel encodes a cancel order message.
 // Format: C,user_id,order_id\n (no symbol per message_parser.c)
 func (e *Encoder) EncodeCancel(cancel *CancelOrder) error {
-	e.buf = e.buf[:0]
-	e.buf = fmt.Appendf(e.buf, "C,%d,%d\n",
+	payload := fmt.Sprintf("C,%d,%d\n",
 		cancel.UserID,
 		cancel.OrderID)
 
-	return e.writeFrame(e.buf)
+	return e.writeFrame([]byte(payload))
 }
 
 // EncodeFlush encodes a flush command.
 // Format: F\n
 func (e *Encoder) EncodeFlush() error {
-	e.buf = e.buf[:0]
-	e.buf = append(e.buf, "F\n"...)
-	return e.writeFrame(e.buf)
+	return e.writeFrame([]byte("F\n"))
 }
