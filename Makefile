@@ -1,6 +1,6 @@
 # Full path: Makefile
 
-.PHONY: all build test bench clean fmt vet lint run run-i list scenario help
+.PHONY: all build test bench clean fmt vet lint run run-tcp run-udp run-udp-binary list scenario help
 
 # Binary name and paths
 BINARY_NAME=meclient
@@ -87,20 +87,31 @@ clean:
 list: build
 	@$(BUILD_DIR)/$(BINARY_NAME) -list
 
-# Run client (connects and waits for messages)
-# Usage: make run [HOST=localhost] [PORT=1234]
+#
+# INTERACTIVE MODE TARGETS
+#
+
+# Interactive mode (auto-detect: TCP -> UDP fallback)
 run: build
-	@echo "Connecting to $(HOST):$(PORT)..."
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT)
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -i
 
-# Run in interactive mode
-# Usage: make run-i [HOST=localhost] [PORT=1234]
-run-i: build
-	@echo "Interactive mode - connecting to $(HOST):$(PORT)..."
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -i
+# Interactive via TCP only
+run-tcp: build
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -i -tcp
 
-# Run specific scenario
-# Usage: make scenario S=1 [HOST=localhost] [PORT=1234]
+# Interactive via UDP
+run-udp: build
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -i -udp
+
+# Interactive via UDP with binary protocol
+run-udp-binary: build
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -i -udp -binary
+
+#
+# SCENARIO TARGETS
+#
+
+# Run specific scenario (auto-detect transport)
 scenario: build
 ifndef S
 	@echo "Usage: make scenario S=<scenario_id>"
@@ -108,31 +119,33 @@ ifndef S
 	@echo ""
 	@$(BUILD_DIR)/$(BINARY_NAME) -list
 else
-	@echo "Running scenario $(S) against $(HOST):$(PORT)..."
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) $(S) -v
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) $(S) -v
 endif
 
-# Run with UDP transport
-# Usage: make run-udp [HOST=localhost] [PORT=1234]
-run-udp: build
-	@echo "Connecting via UDP to $(HOST):$(PORT)..."
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -udp
+# Run scenario via UDP
+scenario-udp: build
+ifndef S
+	@echo "Usage: make scenario-udp S=<scenario_id>"
+	@echo "Example: make scenario-udp S=1"
+else
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) $(S) -v -udp
+endif
 
-# Run with binary protocol (forced)
-# Usage: make run-binary [HOST=localhost] [PORT=1234]
-run-binary: build
-	@echo "Connecting with binary protocol to $(HOST):$(PORT)..."
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) -binary
+#
+# STRESS TEST TARGETS
+#
 
-# Stress test shortcuts
 stress-1k: build
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 10
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 10
 
 stress-10k: build
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 11
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 11
 
-stress-100k: build
-	$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 12
+stress-1k-udp: build
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 10 -udp
+
+stress-10k-udp: build
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) 11 -udp
 
 # Tidy up go.mod
 tidy:
@@ -145,34 +158,43 @@ help:
 	@echo "Matching Engine Go Client"
 	@echo "========================="
 	@echo ""
-	@echo "Build targets:"
+	@echo "Build:"
 	@echo "  make build           - Build the binary"
-	@echo "  make build-release   - Build optimized binary"
+	@echo "  make build-release   - Build optimized binary (smaller)"
 	@echo "  make clean           - Remove build artifacts"
 	@echo ""
-	@echo "Test targets:"
+	@echo "Test:"
 	@echo "  make test            - Run all tests"
 	@echo "  make test-coverage   - Run tests with coverage report"
 	@echo "  make test-race       - Run tests with race detection"
 	@echo "  make bench           - Run benchmarks"
 	@echo ""
-	@echo "Run targets (default: HOST=localhost PORT=1234):"
-	@echo "  make run             - Connect and listen for messages"
-	@echo "  make run-i           - Interactive mode"
-	@echo "  make run-udp         - Connect via UDP"
-	@echo "  make run-binary      - Force binary protocol"
-	@echo "  make scenario S=N    - Run scenario N"
+	@echo "Interactive Mode (default: HOST=localhost PORT=1234):"
+	@echo "  make run             - Interactive (auto-detect transport)"
+	@echo "  make run-tcp         - Interactive via TCP only"
+	@echo "  make run-udp         - Interactive via UDP"
+	@echo "  make run-udp-binary  - Interactive via UDP with binary"
+	@echo ""
+	@echo "Scenarios:"
 	@echo "  make list            - List available scenarios"
+	@echo "  make scenario S=N    - Run scenario N (auto-detect)"
+	@echo "  make scenario-udp S=N - Run scenario N via UDP"
 	@echo ""
-	@echo "Stress tests:"
-	@echo "  make stress-1k       - Run 1K order stress test"
-	@echo "  make stress-10k      - Run 10K order stress test"
-	@echo "  make stress-100k     - Run 100K order stress test"
+	@echo "Stress Tests:"
+	@echo "  make stress-1k       - 1K orders (auto-detect)"
+	@echo "  make stress-10k      - 10K orders (auto-detect)"
+	@echo "  make stress-1k-udp   - 1K orders via UDP"
+	@echo "  make stress-10k-udp  - 10K orders via UDP"
 	@echo ""
-	@echo "Code quality:"
+	@echo "Code Quality:"
 	@echo "  make fmt             - Format code"
 	@echo "  make vet             - Run go vet"
 	@echo "  make lint            - Run staticcheck"
 	@echo "  make tidy            - Tidy go.mod"
 	@echo ""
-	@echo "Override server: make run HOST=192.168.1.10 PORT=5000"
+	@echo "Examples:"
+	@echo "  make run                          # Interactive mode"
+	@echo "  make run-udp                      # Interactive via UDP"
+	@echo "  make run HOST=192.168.1.10        # Different host"
+	@echo "  make scenario S=1                 # Run scenario 1"
+	@echo "  make scenario-udp S=2             # Scenario 2 via UDP"
