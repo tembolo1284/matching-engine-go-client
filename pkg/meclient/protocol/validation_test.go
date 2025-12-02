@@ -84,8 +84,12 @@ func TestValidateOrder_ZeroQuantity(t *testing.T) {
 		OrderID: 1,
 	}
 
-	if err := ValidateOrder(order); err != nil {
-		t.Errorf("unexpected error: %v", err)
+	err := ValidateOrder(order)
+	if err == nil {
+		t.Error("expected error for zero quantity")
+	}
+	if err != ErrZeroQuantity {
+		t.Errorf("expected ErrZeroQuantity, got %v", err)
 	}
 }
 
@@ -141,7 +145,6 @@ func TestValidateCancel_ZeroOrderID(t *testing.T) {
 		OrderID: 0,
 	}
 
-	// Zero order ID is allowed (server will handle)
 	err := ValidateCancel(cancel)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
@@ -154,7 +157,6 @@ func TestValidateCancel_ZeroUserID(t *testing.T) {
 		OrderID: 1001,
 	}
 
-	// Zero user ID is allowed (server will handle)
 	err := ValidateCancel(cancel)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
