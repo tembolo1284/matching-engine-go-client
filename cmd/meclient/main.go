@@ -1,10 +1,16 @@
-// Command example demonstrates usage of the matching engine Go client.
+// Full path: cmd/meclient/main.go
+
+// Command meclient is a Go client for the matching engine server.
 //
 // Usage:
 //
-//	./example -addr localhost:1234
-//	./example -addr localhost:1234 -interactive
-//	./example -addr localhost:1234 -demo
+//	./meclient localhost 1234           # Connect via TCP, auto-detect protocol
+//	./meclient localhost 1234 1         # Run scenario 1
+//	./meclient localhost 1234 -demo     # Run demo sequence
+//	./meclient localhost 1234 -i        # Interactive mode
+//	./meclient localhost 1234 -udp      # Use UDP transport
+//	./meclient localhost 1234 -binary   # Force binary protocol
+//	./meclient -list                    # List all scenarios
 package main
 
 import (
@@ -20,26 +26,92 @@ import (
 	"time"
 
 	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient"
+	"github.com/tembolo1284/matching-engine-go-client/pkg/scenarios"
 )
 
 func main() {
-	addr := flag.String("addr", "localhost:1234", "Server address (host:port)")
-	interactive := flag.Bool("interactive", false, "Run in interactive mode")
+	// Flags
+	interactive := flag.Bool("i", false, "Run in interactive mode")
 	demo := flag.Bool("demo", false, "Run demo sequence")
+	list := flag.Bool("list", false, "List available scenarios")
 	userID := flag.Uint("user", 1, "Default user ID for orders")
+	dangerBurst := flag.Bool("danger-burst", false, "Allow unthrottled burst mode scenarios")
+	verbose := flag.Bool("v", false, "Verbose output for scenarios")
+
+	// Transport/Protocol flags
+	useUDP := flag.Bool("udp", false, "Use UDP transport (default: TCP)")
+	useBinary := flag.Bool("binary", false, "Force binary protocol (default: auto-detect for TCP, CSV for UDP)")
+
 	flag.Parse()
+
+	// List scenarios and exit
+	if *list {
+		scenarios.PrintList()
+		return
+	}
+
+	// Parse positional args: HOST PORT [SCENARIO]
+	args := flag.Args()
+	if len(args) < 2 && !*list {
+		printUsage()
+		os.Exit(1)
+	}
+
+	host := args[0]
+	port := args[1]
+	addr := fmt.Sprintf("%s:%s", host, port)
+
+	// Check for scenario ID
+	var scenarioID int
+	if len(args) >= 3 {
+		id, err := strconv.Atoi(args[2])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Invalid scenario ID: %s\n", args[2])
+			os.Exit(1)
+		}
+		scenarioID = id
+	}
 
 	fmt.Printf("Matching Engine Go Client\n")
 	fmt.Printf("=========================\n\n")
 
-	cfg := meclient.DefaultConfig(*addr)
+	// Build config
+	cfg := meclient.DefaultConfig(addr)
+
+	// Set transport
+	if *useUDP {
+		cfg.Transport = meclient.TransportUDP
+		cfg.AutoReconnect = false // No reconnect for UDP
+	}
+
+	// Set protocol
+	if *useBinary {
+		cfg.Protocol = meclient.ProtocolBinary
+	} else if *useUDP {
+		// UDP defaults to CSV (no auto-detect possible)
+		cfg.Protocol = meclient.ProtocolCSV
+	}
+	// TCP defaults to ProtocolAuto (will probe)
+
 	client, err := meclient.New(cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to create client: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Connecting to %s...\n", *addr)
+	// Print connection info
+	transportStr := "TCP"
+	if *useUDP {
+		transportStr = "UDP"
+	}
+	protocolStr := "auto-detect"
+	if cfg.Protocol == meclient.ProtocolCSV {
+		protocolStr = "CSV"
+	} else if cfg.Protocol == meclient.ProtocolBinary {
+		protocolStr = "binary"
+	}
+	fmt.Printf("Connecting to %s via %s (protocol: %s)...\n", addr, transportStr, protocolStr)
+
 	if err := client.Connect(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to connect: %v\n", err)
 		os.Exit(1)
@@ -52,8 +124,8 @@ func main() {
 	var wg sync.WaitGroup
 	done := make(chan struct{})
 
-	// Only start background receiver for non-demo modes
-	if !*demo {
+	// Only start background receiver for non-demo/non-scenario modes
+	if !*demo && scenarioID == 0 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -61,7 +133,23 @@ func main() {
 		}()
 	}
 
-	if *demo {
+	// Run mode
+	if scenarioID > 0 {
+		// Run specific scenario
+		runner := scenarios.NewRunner(client, uint32(*userID), *verbose)
+		result, err := runner.Run(scenarioID, *dangerBurst)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Scenario error: %v\n", err)
+			if !scenarios.IsValid(scenarioID) {
+				fmt.Println()
+				scenarios.PrintList()
+			}
+			os.Exit(1)
+		}
+		if result != nil && scenarioID < 10 { // Only print for basic scenarios
+			result.Print()
+		}
+	} else if *demo {
 		runDemo(client, uint32(*userID))
 	} else if *interactive {
 		runInteractive(client, uint32(*userID), shutdown)
@@ -147,31 +235,25 @@ func runDemo(client *meclient.Client, userID uint32) {
 		for {
 			select {
 			case ack := <-client.Acks():
-				fmt.Printf("   <- ACK %s user=%d order=%d\n", ack.Symbol, ack.UserID, ack.OrderID)
+				fmt.Printf("   [ACK] %s user=%d order=%d\n", ack.Symbol, ack.UserID, ack.OrderID)
 			case trade := <-client.Trades():
-				fmt.Printf("   <- TRADE %s buy(%d,%d) sell(%d,%d) price=%d qty=%d\n",
+				fmt.Printf("   [TRADE] %s buy(%d,%d) sell(%d,%d) price=%d qty=%d\n",
 					trade.Symbol,
 					trade.BuyUserID, trade.BuyOrderID,
 					trade.SellUserID, trade.SellOrderID,
 					trade.Price, trade.Qty)
 			case update := <-client.BookUpdates():
-				fmt.Printf("   <- BOOK %s %s price=%d qty=%d\n",
+				fmt.Printf("   [BOOK] %s %s price=%d qty=%d\n",
 					update.Symbol, update.Side, update.Price, update.Qty)
 			case cancelAck := <-client.CancelAcks():
-				fmt.Printf("   <- CANCEL %s user=%d order=%d\n", cancelAck.Symbol, cancelAck.UserID, cancelAck.OrderID)
+				fmt.Printf("   [CANCEL] %s user=%d order=%d\n", cancelAck.Symbol, cancelAck.UserID, cancelAck.OrderID)
 			case err := <-client.Errors():
-				fmt.Printf("   <- ERROR: %v\n", err)
+				fmt.Printf("   [ERROR] %v\n", err)
 			case <-deadline:
 				return
 			}
 		}
 	}
-
-	// Check for any immediate errors
-	fmt.Println("Checking connection...")
-	drainResponses(100 * time.Millisecond)
-	fmt.Println("Connection OK, starting scenarios...")
-	fmt.Println()
 
 	// Helper to send order and wait for response
 	sendOrder := func(order meclient.NewOrder) {
@@ -193,7 +275,7 @@ func runDemo(client *meclient.Client, userID uint32) {
 
 	// Helper to send cancel and wait for response
 	sendCancel := func(cancel meclient.CancelOrder) {
-		fmt.Printf("-> CANCEL %s user=%d oid=%d\n", cancel.Symbol, cancel.UserID, cancel.OrderID)
+		fmt.Printf("-> CANCEL user=%d oid=%d\n", cancel.UserID, cancel.OrderID)
 		if err := client.SendCancel(cancel); err != nil {
 			fmt.Printf("   Send error: %v\n", err)
 			return
@@ -231,7 +313,7 @@ func runDemo(client *meclient.Client, userID uint32) {
 	fmt.Println()
 	fmt.Println("=== Scenario 4: Cancel Order ===")
 	sendOrder(meclient.NewOrder{UserID: userID, Symbol: "IBM", Price: 100, Qty: 50, Side: meclient.SideBuy, OrderID: 7})
-	sendCancel(meclient.CancelOrder{Symbol: "IBM", UserID: userID, OrderID: 7})
+	sendCancel(meclient.CancelOrder{UserID: userID, OrderID: 7})
 	sendFlush()
 
 	fmt.Println()
@@ -312,8 +394,7 @@ func runInteractive(client *meclient.Client, defaultUserID uint32, shutdown <-ch
 				fmt.Printf("Error: %v\n", err)
 				continue
 			}
-			fmt.Printf("Sending CANCEL %s user=%d oid=%d\n",
-				cancel.Symbol, cancel.UserID, cancel.OrderID)
+			fmt.Printf("Sending CANCEL user=%d oid=%d\n", cancel.UserID, cancel.OrderID)
 			if err := client.SendCancel(cancel); err != nil {
 				fmt.Printf("Send error: %v\n", err)
 			}
@@ -384,60 +465,11 @@ func parseOrderCommand(parts []string, side meclient.Side, defaultUserID uint32,
 }
 
 func parseCancelCommand(parts []string, defaultUserID uint32) (meclient.CancelOrder, error) {
-	if len(parts) < 3 {
-		return meclient.CancelOrder{}, fmt.Errorf("usage: cancel SYMBOL ORDER_ID [USER_ID]")
+	if len(parts) < 2 {
+		return meclient.CancelOrder{}, fmt.Errorf("usage: cancel ORDER_ID [USER_ID]")
 	}
 
-	symbol := strings.ToUpper(parts[1])
-
-	orderID, err := strconv.ParseUint(parts[2], 10, 32)
+	orderID, err := strconv.ParseUint(parts[1], 10, 32)
 	if err != nil {
-		return meclient.CancelOrder{}, fmt.Errorf("invalid order_id: %s", parts[2])
+		return meclient.CancelOrder{}, fmt.Errorf("invalid order_id: %s", parts[1])
 	}
-
-	userID := defaultUserID
-	if len(parts) >= 4 {
-		u, err := strconv.ParseUint(parts[3], 10, 32)
-		if err != nil {
-			return meclient.CancelOrder{}, fmt.Errorf("invalid user_id: %s", parts[3])
-		}
-		userID = uint32(u)
-	}
-
-	return meclient.CancelOrder{
-		Symbol:  symbol,
-		UserID:  userID,
-		OrderID: uint32(orderID),
-	}, nil
-}
-
-func printUsage() {
-	fmt.Println("Usage:")
-	fmt.Println("  ./example -addr HOST:PORT              Connect and listen for messages")
-	fmt.Println("  ./example -addr HOST:PORT -demo        Run demo order sequence")
-	fmt.Println("  ./example -addr HOST:PORT -interactive Interactive command mode")
-	fmt.Println()
-	fmt.Println("Options:")
-	fmt.Println("  -addr string    Server address (default: localhost:1234)")
-	fmt.Println("  -user uint      Default user ID (default: 1)")
-	fmt.Println("  -demo           Run demo sequence")
-	fmt.Println("  -interactive    Interactive mode")
-}
-
-func printHelp() {
-	fmt.Println("Commands:")
-	fmt.Println("  buy SYMBOL QTY PRICE [USER_ID]    Place buy order")
-	fmt.Println("  sell SYMBOL QTY PRICE [USER_ID]   Place sell order")
-	fmt.Println("  cancel SYMBOL ORDER_ID [USER_ID]  Cancel order")
-	fmt.Println("  flush                             Flush all order books")
-	fmt.Println("  status                            Show connection status")
-	fmt.Println("  help                              Show this help")
-	fmt.Println("  quit                              Exit")
-	fmt.Println()
-	fmt.Println("Examples:")
-	fmt.Println("  buy IBM 100 150      Buy 100 IBM @ 150")
-	fmt.Println("  sell AAPL 50 175     Sell 50 AAPL @ 175")
-	fmt.Println("  cancel IBM 1001      Cancel order 1001 on IBM")
-	fmt.Println()
-	fmt.Println("Shortcuts: b=buy, s=sell, c=cancel, f=flush, h=help, q=quit")
-}

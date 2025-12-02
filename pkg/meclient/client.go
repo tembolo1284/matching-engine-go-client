@@ -1,14 +1,74 @@
+// Full path: pkg/meclient/client.go
+
+// Package meclient provides a Go client for the matching engine server.
 package meclient
 
 import (
-	"bufio"
 	"context"
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"sync"
 	"time"
+
+	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient/config"
+	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient/internal/stats"
+	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient/protocol"
+	"github.com/tembolo1284/matching-engine-go-client/pkg/meclient/transport"
+)
+
+// Re-export types from subpackages for convenient access
+type (
+	Config         = config.Config
+	Transport      = config.Transport
+	Protocol       = config.Protocol
+	Side           = protocol.Side
+	NewOrder       = protocol.NewOrder
+	CancelOrder    = protocol.CancelOrder
+	Ack            = protocol.Ack
+	Trade          = protocol.Trade
+	BookUpdate     = protocol.BookUpdate
+	CancelAck      = protocol.CancelAck
+	ReconnectEvent = protocol.ReconnectEvent
+	StatsSnapshot  = stats.Snapshot
+)
+
+// Re-export constants
+const (
+	SideBuy  = protocol.SideBuy
+	SideSell = protocol.SideSell
+
+	TransportTCP = config.TransportTCP
+	TransportUDP = config.TransportUDP
+
+	ProtocolAuto   = config.ProtocolAuto
+	ProtocolCSV    = config.ProtocolCSV
+	ProtocolBinary = config.ProtocolBinary
+
+	DefaultPort = config.DefaultPort
+)
+
+// Re-export config functions
+var (
+	DefaultConfig = config.Default
+)
+
+// Re-export errors
+var (
+	ErrInvalidConfig = config.ErrInvalidConfig
+	ErrEmptySymbol   = protocol.ErrEmptySymbol
+	ErrSymbolTooLong = protocol.ErrSymbolTooLong
+	ErrZeroQuantity  = protocol.ErrZeroQuantity
+	ErrInvalidSide   = protocol.ErrInvalidSide
+)
+
+// Client-specific errors
+var (
+	ErrClientClosed   = errors.New("client closed")
+	ErrNotConnected   = errors.New("not connected")
+	ErrWriteQueueFull = errors.New("write queue full")
+	ErrChannelFull    = errors.New("channel full, message dropped")
+	ErrMaxReconnects  = errors.New("maximum reconnection attempts exceeded")
 )
 
 // Internal write request types
@@ -22,47 +82,49 @@ const (
 
 type writeRequest struct {
 	reqType writeRequestType
-	order   NewOrder
-	cancel  CancelOrder
+	order   protocol.NewOrder
+	cancel  protocol.CancelOrder
 }
 
-// Client is a TCP client for the matching engine.
-type Client struct {
-	cfg Config
+// FlushableTransport extends transport with Flush capability
+type FlushableTransport interface {
+	transport.Transport
+	Flush() error
+}
 
-	// Connection
-	conn   net.Conn
-	connMu sync.RWMutex
+// Client is a client for the matching engine.
+type Client struct {
+	cfg config.Config
+
+	// Transport
+	transport transport.Transport
+
+	// Protocol
+	encoder *protocol.Encoder
 
 	// Write path
 	writeCh chan writeRequest
-	writer  *bufio.Writer
-	encoder *encoder
 
 	// Output channels
-	ackCh        chan Ack
-	tradeCh      chan Trade
-	bookUpdateCh chan BookUpdate
-	cancelAckCh  chan CancelAck
+	ackCh        chan protocol.Ack
+	tradeCh      chan protocol.Trade
+	bookUpdateCh chan protocol.BookUpdate
+	cancelAckCh  chan protocol.CancelAck
 	errorCh      chan error
-	reconnectCh  chan ReconnectEvent
+	reconnectCh  chan protocol.ReconnectEvent
 
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	// State
-	connected   bool
-	connectedMu sync.RWMutex
-
-	// Metrics (cache-line padded)
-	stats ClientStats
+	// Metrics
+	stats stats.Stats
 }
 
 // New creates a new client with the given configuration.
-func New(cfg Config) (*Client, error) {
-	cfg = applyDefaults(cfg)
+func New(cfg config.Config) (*Client, error) {
+	cfg = config.ApplyDefaults(cfg)
 
 	if err := cfg.Validate(); err != nil {
 		return nil, err
@@ -73,12 +135,12 @@ func New(cfg Config) (*Client, error) {
 	return &Client{
 		cfg:          cfg,
 		writeCh:      make(chan writeRequest, cfg.ChannelBuffer),
-		ackCh:        make(chan Ack, cfg.ChannelBuffer),
-		tradeCh:      make(chan Trade, cfg.ChannelBuffer),
-		bookUpdateCh: make(chan BookUpdate, cfg.ChannelBuffer),
-		cancelAckCh:  make(chan CancelAck, cfg.ChannelBuffer),
+		ackCh:        make(chan protocol.Ack, cfg.ChannelBuffer),
+		tradeCh:      make(chan protocol.Trade, cfg.ChannelBuffer),
+		bookUpdateCh: make(chan protocol.BookUpdate, cfg.ChannelBuffer),
+		cancelAckCh:  make(chan protocol.CancelAck, cfg.ChannelBuffer),
 		errorCh:      make(chan error, cfg.ChannelBuffer),
-		reconnectCh:  make(chan ReconnectEvent, 16),
+		reconnectCh:  make(chan protocol.ReconnectEvent, 16),
 		ctx:          ctx,
 		cancel:       cancel,
 	}, nil
@@ -90,9 +152,15 @@ func (c *Client) Connect() error {
 		return ErrClientClosed
 	}
 
-	if err := c.dial(); err != nil {
+	// Create transport
+	c.transport = transport.New(&c.cfg)
+
+	if err := c.transport.Connect(); err != nil {
 		return err
 	}
+
+	// Create encoder
+	c.encoder = protocol.NewEncoder(c.transport.Writer())
 
 	c.wg.Add(2)
 	go c.readLoop()
@@ -101,37 +169,12 @@ func (c *Client) Connect() error {
 	return nil
 }
 
-func (c *Client) dial() error {
-	dialer := net.Dialer{Timeout: c.cfg.ConnectTimeout}
-
-	conn, err := dialer.DialContext(c.ctx, "tcp", c.cfg.Address)
-	if err != nil {
-		return fmt.Errorf("failed to connect to %s: %w", c.cfg.Address, err)
-	}
-
-	c.connMu.Lock()
-	c.conn = conn
-	c.writer = bufio.NewWriterSize(conn, DefaultWriteBuffer)
-	c.encoder = newEncoder(c.writer)
-	c.connMu.Unlock()
-
-	c.setConnected(true)
-	return nil
-}
-
 // Close gracefully shuts down the client.
 func (c *Client) Close() error {
 	c.cancel()
 
-	c.connMu.Lock()
-	conn := c.conn
-	c.conn = nil
-	c.connMu.Unlock()
-
-	c.setConnected(false)
-
-	if conn != nil {
-		_ = conn.Close()
+	if c.transport != nil {
+		_ = c.transport.Close()
 	}
 
 	c.wg.Wait()
@@ -150,8 +193,8 @@ func (c *Client) closeChannels() {
 }
 
 // SendOrder sends a new order to the matching engine.
-func (c *Client) SendOrder(order NewOrder) error {
-	if err := validateOrder(&order); err != nil {
+func (c *Client) SendOrder(order protocol.NewOrder) error {
+	if err := protocol.ValidateOrder(&order); err != nil {
 		return err
 	}
 
@@ -159,8 +202,8 @@ func (c *Client) SendOrder(order NewOrder) error {
 }
 
 // SendCancel sends a cancel request to the matching engine.
-func (c *Client) SendCancel(cancel CancelOrder) error {
-	if err := validateCancel(&cancel); err != nil {
+func (c *Client) SendCancel(cancel protocol.CancelOrder) error {
+	if err := protocol.ValidateCancel(&cancel); err != nil {
 		return err
 	}
 
@@ -181,44 +224,33 @@ func (c *Client) enqueueWrite(req writeRequest) error {
 	case <-c.ctx.Done():
 		return ErrClientClosed
 	case c.writeCh <- req:
-		c.stats.incMessagesSent()
+		c.stats.IncMessagesSent()
 		return nil
 	default:
-		c.stats.incDroppedMessages()
+		c.stats.IncDroppedMessages()
 		return ErrWriteQueueFull
 	}
 }
 
 // Channel accessors
-func (c *Client) Acks() <-chan Ack               { return c.ackCh }
-func (c *Client) Trades() <-chan Trade           { return c.tradeCh }
-func (c *Client) BookUpdates() <-chan BookUpdate { return c.bookUpdateCh }
-func (c *Client) CancelAcks() <-chan CancelAck   { return c.cancelAckCh }
-func (c *Client) Errors() <-chan error           { return c.errorCh }
-func (c *Client) Reconnects() <-chan ReconnectEvent { return c.reconnectCh }
+func (c *Client) Acks() <-chan protocol.Ack               { return c.ackCh }
+func (c *Client) Trades() <-chan protocol.Trade           { return c.tradeCh }
+func (c *Client) BookUpdates() <-chan protocol.BookUpdate { return c.bookUpdateCh }
+func (c *Client) CancelAcks() <-chan protocol.CancelAck   { return c.cancelAckCh }
+func (c *Client) Errors() <-chan error                    { return c.errorCh }
+func (c *Client) Reconnects() <-chan protocol.ReconnectEvent { return c.reconnectCh }
 
 // IsConnected returns true if the client is currently connected.
 func (c *Client) IsConnected() bool {
-	c.connectedMu.RLock()
-	defer c.connectedMu.RUnlock()
-	return c.connected
+	if c.transport == nil {
+		return false
+	}
+	return c.transport.IsConnected()
 }
 
 // Stats returns a snapshot of the current client statistics.
-func (c *Client) Stats() StatsSnapshot {
-	return c.stats.Snapshot()
-}
-
-func (c *Client) setConnected(v bool) {
-	c.connectedMu.Lock()
-	c.connected = v
-	c.connectedMu.Unlock()
-}
-
-func (c *Client) getConn() net.Conn {
-	c.connMu.RLock()
-	defer c.connMu.RUnlock()
-	return c.conn
+func (c *Client) Stats() stats.Snapshot {
+	return c.stats.GetSnapshot()
 }
 
 // readLoop continuously reads messages from the server.
@@ -228,8 +260,8 @@ func (c *Client) readLoop() {
 	consecutiveErrors := 0
 
 	for {
-		if consecutiveErrors >= MaxConsecutiveErrors {
-			c.sendError(fmt.Errorf("max consecutive errors (%d) exceeded", MaxConsecutiveErrors))
+		if consecutiveErrors >= config.MaxConsecutiveErrors {
+			c.sendError(fmt.Errorf("max consecutive errors (%d) exceeded", config.MaxConsecutiveErrors))
 			return
 		}
 
@@ -237,15 +269,14 @@ func (c *Client) readLoop() {
 			return
 		}
 
-		conn := c.getConn()
-		if conn == nil {
+		if c.transport == nil || !c.transport.IsConnected() {
 			if !c.waitForReconnect() {
 				return
 			}
 			continue
 		}
 
-		err := c.processInboundMessages(conn)
+		err := c.processInboundMessages()
 		if err != nil {
 			consecutiveErrors++
 			if !c.handleReadError(err) {
@@ -256,30 +287,34 @@ func (c *Client) readLoop() {
 	}
 }
 
-func (c *Client) processInboundMessages(conn net.Conn) error {
-	decoder := newDecoder(conn)
+func (c *Client) processInboundMessages() error {
+	reader := c.transport.Reader()
+	if reader == nil {
+		return errors.New("no reader available")
+	}
+
+	decoder := protocol.NewDecoder(reader)
 	batchCount := 0
 
 	for {
-		if batchCount >= MaxMessageBatchSize {
+		if batchCount >= config.MaxMessageBatchSize {
 			if c.ctx.Err() != nil {
 				return c.ctx.Err()
 			}
 			batchCount = 0
 		}
 
-		msg, err := decoder.decode()
+		msg, err := decoder.Decode()
 		if err != nil {
 			if err == io.EOF {
 				return errors.New("connection closed by server")
 			}
-			// Log decode errors for debugging
 			c.sendError(fmt.Errorf("decode error: %w", err))
 			return err
 		}
 
 		c.dispatchMessage(msg)
-		c.stats.incMessagesReceived()
+		c.stats.IncMessagesReceived()
 		batchCount++
 	}
 }
@@ -289,9 +324,8 @@ func (c *Client) handleReadError(err error) bool {
 		return false
 	}
 
-	c.setConnected(false)
 	c.sendError(fmt.Errorf("read error: %w", err))
-	c.stats.incErrorCount()
+	c.stats.IncErrorCount()
 
 	if c.cfg.AutoReconnect {
 		return c.reconnect()
@@ -299,7 +333,7 @@ func (c *Client) handleReadError(err error) bool {
 	return false
 }
 
-func (c *Client) dispatchMessage(msg *message) {
+func (c *Client) dispatchMessage(msg *protocol.Message) {
 	switch {
 	case msg.Ack != nil:
 		c.trySendAck(*msg.Ack)
@@ -312,38 +346,38 @@ func (c *Client) dispatchMessage(msg *message) {
 	}
 }
 
-func (c *Client) trySendAck(v Ack) {
+func (c *Client) trySendAck(v protocol.Ack) {
 	select {
 	case c.ackCh <- v:
 	default:
-		c.stats.incDroppedMessages()
+		c.stats.IncDroppedMessages()
 		c.sendError(ErrChannelFull)
 	}
 }
 
-func (c *Client) trySendTrade(v Trade) {
+func (c *Client) trySendTrade(v protocol.Trade) {
 	select {
 	case c.tradeCh <- v:
 	default:
-		c.stats.incDroppedMessages()
+		c.stats.IncDroppedMessages()
 		c.sendError(ErrChannelFull)
 	}
 }
 
-func (c *Client) trySendBookUpdate(v BookUpdate) {
+func (c *Client) trySendBookUpdate(v protocol.BookUpdate) {
 	select {
 	case c.bookUpdateCh <- v:
 	default:
-		c.stats.incDroppedMessages()
+		c.stats.IncDroppedMessages()
 		c.sendError(ErrChannelFull)
 	}
 }
 
-func (c *Client) trySendCancelAck(v CancelAck) {
+func (c *Client) trySendCancelAck(v protocol.CancelAck) {
 	select {
 	case c.cancelAckCh <- v:
 	default:
-		c.stats.incDroppedMessages()
+		c.stats.IncDroppedMessages()
 		c.sendError(ErrChannelFull)
 	}
 }
@@ -358,31 +392,22 @@ func (c *Client) sendError(err error) {
 // writeLoop processes outbound messages.
 func (c *Client) writeLoop() {
 	defer c.wg.Done()
-	// fmt.Println("[DEBUG] writeLoop started")
 
 	for {
 		select {
 		case <-c.ctx.Done():
-			// fmt.Println("[DEBUG] writeLoop: context done, exiting")
 			return
 		case req := <-c.writeCh:
-			// fmt.Printf("[DEBUG] writeLoop: received request type %d\n", req.reqType)
 			if err := c.processWrite(req); err != nil {
 				c.sendError(fmt.Errorf("write error: %w", err))
-				c.stats.incErrorCount()
+				c.stats.IncErrorCount()
 			}
 		}
 	}
 }
 
 func (c *Client) processWrite(req writeRequest) error {
-	c.connMu.RLock()
-	encoder := c.encoder
-	writer := c.writer
-	c.connMu.RUnlock()
-
-	if encoder == nil || writer == nil {
-		// fmt.Println("[DEBUG] processWrite: encoder or writer is nil!")
+	if c.encoder == nil {
 		return ErrNotConnected
 	}
 
@@ -390,42 +415,45 @@ func (c *Client) processWrite(req writeRequest) error {
 
 	switch req.reqType {
 	case writeRequestOrder:
-		// fmt.Printf("[DEBUG] Writing order: %s %d @ %d\n", req.order.Symbol, req.order.Qty, req.order.Price)
-		err = encoder.encodeNewOrder(&req.order)
+		err = c.encoder.EncodeNewOrder(&req.order)
 	case writeRequestCancel:
-		// fmt.Printf("[DEBUG] Writing cancel: %s oid=%d\n", req.cancel.Symbol, req.cancel.OrderID)
-		err = encoder.encodeCancel(&req.cancel)
+		err = c.encoder.EncodeCancel(&req.cancel)
 	case writeRequestFlush:
-		// fmt.Println("[DEBUG] Writing flush")
-		err = encoder.encodeFlush()
+		err = c.encoder.EncodeFlush()
 	}
 
 	if err != nil {
-		// fmt.Printf("[DEBUG] Encode error: %v\n", err)
 		return err
 	}
 
-	err = writer.Flush()
-	if err != nil {
-		fmt.Printf("[DEBUG] Flush error: %v\n", err)
-	} else {
-		// fmt.Println("[DEBUG] Flush successful")
+	// Flush the transport if it supports it
+	if ft, ok := c.transport.(FlushableTransport); ok {
+		return ft.Flush()
 	}
-	return err
+
+	return nil
 }
 
 // reconnect attempts to reconnect with exponential backoff.
 func (c *Client) reconnect() bool {
 	delay := c.cfg.ReconnectMinDelay
 
-	for attempt := 1; attempt <= MaxReconnectAttempts; attempt++ {
+	for attempt := 1; attempt <= config.MaxReconnectAttempts; attempt++ {
 		select {
 		case <-c.ctx.Done():
 			return false
 		case <-time.After(delay):
 		}
 
-		if err := c.dial(); err != nil {
+		// Close existing transport
+		if c.transport != nil {
+			_ = c.transport.Close()
+		}
+
+		// Create new transport
+		c.transport = transport.New(&c.cfg)
+
+		if err := c.transport.Connect(); err != nil {
 			c.sendError(fmt.Errorf("reconnect attempt %d failed: %w", attempt, err))
 
 			delay *= 2
@@ -435,10 +463,13 @@ func (c *Client) reconnect() bool {
 			continue
 		}
 
-		c.stats.incReconnectCount()
+		// Recreate encoder
+		c.encoder = protocol.NewEncoder(c.transport.Writer())
+
+		c.stats.IncReconnectCount()
 
 		select {
-		case c.reconnectCh <- ReconnectEvent{Attempt: attempt}:
+		case c.reconnectCh <- protocol.ReconnectEvent{Attempt: attempt}:
 		default:
 		}
 
@@ -451,15 +482,15 @@ func (c *Client) reconnect() bool {
 
 // waitForReconnect waits until a connection is available or the client closes.
 func (c *Client) waitForReconnect() bool {
-	ticker := time.NewTicker(ReconnectCheckInterval)
+	ticker := time.NewTicker(config.ReconnectCheckInterval)
 	defer ticker.Stop()
 
-	for iterations := 0; iterations < MaxReconnectAttempts; iterations++ {
+	for iterations := 0; iterations < config.MaxReconnectAttempts; iterations++ {
 		select {
 		case <-c.ctx.Done():
 			return false
 		case <-ticker.C:
-			if c.getConn() != nil {
+			if c.transport != nil && c.transport.IsConnected() {
 				return true
 			}
 		}
