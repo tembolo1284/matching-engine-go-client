@@ -131,6 +131,15 @@ else
 	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) $(S) -v -udp
 endif
 
+# Run scenario via UDP with binary protocol
+scenario-udp-binary: build
+ifndef S
+	@echo "Usage: make scenario-udp-binary S=<scenario_id>"
+	@echo "Example: make scenario-udp-binary S=1"
+else
+	@$(BUILD_DIR)/$(BINARY_NAME) $(HOST) $(PORT) $(S) -v -udp -binary
+endif
+
 #
 # STRESS TEST TARGETS
 #
